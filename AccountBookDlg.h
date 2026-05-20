@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "SQLiteHelper.h"
+#include "CommFunc.h"
 
 // CAccountBookDlg 对话框
 class CAccountBookDlg : public CDialogEx
@@ -31,4 +33,24 @@ protected:
 	afx_msg void OnPaint();
 	afx_msg HCURSOR OnQueryDragIcon();
 	DECLARE_MESSAGE_MAP()
+private:
+	CSQLiteHelper m_dbHelper;  // 数据库助手对象
+	CString m_sAppPath;
+	CString m_sAppName;
+public:
+	// 用户姓名
+	CEdit m_Edit_UserName;
+	// 变更值
+	CEdit m_Edit_ChangeValue;
+	// 变更备注
+	CEdit m_Edit_ChangeComment;
+	// 个人欠账总表
+	CListCtrl m_List_TotalTable;
+	CButton m_Button_Query;
+	CButton m_Button_Save;
+
+	afx_msg void OnBnClickedButtonQuery();
+	afx_msg void OnBnClickedButtonSave();
+
+	void RefreshTotalTable();
 };
