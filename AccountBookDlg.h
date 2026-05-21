@@ -40,17 +40,26 @@ private:
 public:
 	// 用户姓名
 	CEdit m_Edit_UserName;
-	// 变更值
-	CEdit m_Edit_ChangeValue;
+	// 欠
+	CEdit m_Edit_Borrow;
+	// 还
+	CEdit m_Edit_Repay;
 	// 变更备注
 	CEdit m_Edit_ChangeComment;
 	// 个人欠账总表
 	CListCtrl m_List_TotalTable;
 	CButton m_Button_Query;
 	CButton m_Button_Save;
+	// 结清
+	CButton m_Button_AllSettle;
 
 	afx_msg void OnBnClickedButtonQuery();
 	afx_msg void OnBnClickedButtonSave();
 
 	void RefreshTotalTable();
+	afx_msg void OnBnClickedButtonAllSettle();
+	virtual void OnOK();
+	virtual BOOL PreTranslateMessage(MSG* pMsg);
+	afx_msg void OnClickListTotalTable(NMHDR* pNMHDR, LRESULT* pResult);
+	afx_msg void OnDblclkListTotalTable(NMHDR* pNMHDR, LRESULT* pResult);
 };

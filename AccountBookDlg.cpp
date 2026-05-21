@@ -60,11 +60,13 @@ void CAccountBookDlg::DoDataExchange(CDataExchange* pDX)
 {
 	CDialogEx::DoDataExchange(pDX);
 	DDX_Control(pDX, IDC_EDIT_USERNAME, m_Edit_UserName);
-	DDX_Control(pDX, IDC_EDIT_DATA_CHANGE, m_Edit_ChangeValue);
 	DDX_Control(pDX, IDC_EDIT_DESC, m_Edit_ChangeComment);
 	DDX_Control(pDX, IDC_LIST_TOTAL_TABLE, m_List_TotalTable);
 	DDX_Control(pDX, IDC_BUTTON_QUERY, m_Button_Query);
 	DDX_Control(pDX, IDC_BUTTON_SAVE, m_Button_Save);
+	DDX_Control(pDX, IDC_EDIT_DATA_BORROW, m_Edit_Borrow);
+	DDX_Control(pDX, IDC_EDIT_DATA_REPAY, m_Edit_Repay);
+	DDX_Control(pDX, IDC_BUTTON_ALL_SETTLE, m_Button_AllSettle);
 }
 
 BEGIN_MESSAGE_MAP(CAccountBookDlg, CDialogEx)
@@ -73,6 +75,9 @@ BEGIN_MESSAGE_MAP(CAccountBookDlg, CDialogEx)
 	ON_WM_QUERYDRAGICON()
 	ON_BN_CLICKED(IDC_BUTTON_QUERY, &CAccountBookDlg::OnBnClickedButtonQuery)
 	ON_BN_CLICKED(IDC_BUTTON_SAVE, &CAccountBookDlg::OnBnClickedButtonSave)
+	ON_BN_CLICKED(IDC_BUTTON_ALL_SETTLE, &CAccountBookDlg::OnBnClickedButtonAllSettle)
+	ON_NOTIFY(NM_CLICK, IDC_LIST_TOTAL_TABLE, &CAccountBookDlg::OnClickListTotalTable)
+	ON_NOTIFY(NM_DBLCLK, IDC_LIST_TOTAL_TABLE, &CAccountBookDlg::OnDblclkListTotalTable)
 END_MESSAGE_MAP()
 
 
@@ -125,7 +130,9 @@ BOOL CAccountBookDlg::OnInitDialog()
 		_T("CREATE TABLE IF NOT EXISTS Change_Log (")
 		_T("id INTEGER PRIMARY KEY AUTOINCREMENT,")
 		_T("user_id INTEGER NOT NULL,")
-		_T("change_val REAL NOT NULL,")
+		_T("change_borrow REAL NOT NULL DEFAULT 0,")    //本次借款
+		_T("change_repay REAL NOT NULL DEFAULT 0,")     //本次还款
+		_T("change_val REAL NOT NULL,")                 //净变动（= borrow - repay）
 		_T("change_date TEXT NOT NULL,")
 		_T("change_comment TEXT DEFAULT '',")
 		_T("FOREIGN KEY(user_id) REFERENCES User(id));");
@@ -142,14 +149,15 @@ BOOL CAccountBookDlg::OnInitDialog()
 	}
 
 	// ---------- 初始化总表列表控件 ----------
-// 设置扩展样式：整行选择 + 网格线
+	// 设置扩展样式：整行选择 + 网格线
 	m_List_TotalTable.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
-	// 插入列（只做一次，因为头控件没有列时才插入）
+	// 插入三列：ID、姓名、欠账总额（只做一次）
 	if (m_List_TotalTable.GetHeaderCtrl()->GetItemCount() == 0)
 	{
-		m_List_TotalTable.InsertColumn(0, _T("姓名"), LVCFMT_LEFT, 160);
-		m_List_TotalTable.InsertColumn(1, _T("欠账总额（元）"), LVCFMT_RIGHT, 160);
+		m_List_TotalTable.InsertColumn(0, _T("ID"), LVCFMT_LEFT, 60);
+		m_List_TotalTable.InsertColumn(1, _T("姓名"), LVCFMT_LEFT, 160);
+		m_List_TotalTable.InsertColumn(2, _T("欠账总额（元）"), LVCFMT_RIGHT, 160);
 	}
 
 	// 加载数据库数据到列表（如果数据库有数据就显示，没有则显示空表格）
@@ -215,102 +223,70 @@ void CAccountBookDlg::OnBnClickedButtonQuery()
 
 void CAccountBookDlg::RefreshTotalTable()
 {
-	//清空列表中所有旧数据
+	// 清空所有已有行（保留表头）
 	m_List_TotalTable.DeleteAllItems();
 
-	//确保列表控件已经设置好列（只需设置一次，可放在 OnInitDialog 中）
-	//    但为了防止未设置，这里做一个简单检测：若无列则添加列
+	// 如果表头还未创建（理论上已在 OnInitDialog 创建，这里做防御性检测）
 	if (m_List_TotalTable.GetHeaderCtrl()->GetItemCount() == 0)
 	{
-		//设置报表风格扩展样式
 		m_List_TotalTable.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-
-		//添加两列：“姓名” 和 “欠账总额”
-		m_List_TotalTable.InsertColumn(0, _T("姓名"), LVCFMT_LEFT, 150);
-		m_List_TotalTable.InsertColumn(1, _T("欠账总额"), LVCFMT_RIGHT, 150);
+		m_List_TotalTable.InsertColumn(0, _T("ID"), LVCFMT_LEFT, 60);
+		m_List_TotalTable.InsertColumn(1, _T("姓名"), LVCFMT_LEFT, 160);
+		m_List_TotalTable.InsertColumn(2, _T("欠账总额（元）"), LVCFMT_RIGHT, 160);
 	}
 
-	//从数据库查询所有 User 记录
-	//    使用结构体 + 静态回调来收集数据（避免 lambda 可能引起的编译问题）
+	// 查询参数（仅需列表指针）
 	struct QueryParam {
-		CListCtrl* pList;            //指向列表控件
-		CAccountBookDlg* pDlg;       //可通过它访问 m_dbHelper，但回调是静态的
-		CSQLiteHelper* pDB;          //直接传数据库对象指针
+		CListCtrl* pList;
 	};
 
-	//静态回调函数（不能在函数内声明 lambda 时要求 C++11，用静态更保险）
-	static auto callback = [](void* pParam, int argc, char** argv, char** azColName) -> int {
+	// 回调：将查询结果插入列表
+	static auto callback = [](void* pParam, int argc, char** argv, char** /*azColName*/) -> int {
 		QueryParam* param = (QueryParam*)pParam;
-		if (argc < 2 || !argv[0] || !argv[1])
-			return 0;  // 无效行
+		if (argc < 3 || !argv[0] || !argv[1] || !argv[2])
+			return 0;
 
-		// 从 UTF-8 转为可显示的 CString
-		CString strName = FromUtf8(argv[0]);
-		CString strTotal = FromUtf8(argv[1]);   // 总额是数字，转换也没副作用
+		CString strID = FromUtf8(argv[0]);
+		CString strName = FromUtf8(argv[1]);
+		CString strTotal = FromUtf8(argv[2]);
 
-		// 插入列表新行
 		int nIndex = param->pList->GetItemCount();
-		nIndex = param->pList->InsertItem(nIndex, strName);
+		nIndex = param->pList->InsertItem(nIndex, strID);   // 第0列：ID
 		if (nIndex >= 0)
 		{
-			param->pList->SetItemText(nIndex, 1, strTotal);
+			param->pList->SetItemText(nIndex, 1, strName);  // 第1列：姓名
+			param->pList->SetItemText(nIndex, 2, strTotal); // 第2列：欠账总额
 		}
 		return 0;
 		};
 
 	QueryParam param;
 	param.pList = &m_List_TotalTable;
-	param.pDB = &m_dbHelper;
 
-	//执行查询 SQL（简单 SELECT）
-	if (!m_dbHelper.ExecuteQuery(_T("SELECT user_name, user_total FROM User ORDER BY id;"),
+	// 查询 id, user_name, user_total
+	if (!m_dbHelper.ExecuteQuery(_T("SELECT id, user_name, user_total FROM User ORDER BY id;"),
 		callback, &param))
 	{
 		AfxMessageBox(_T("刷新总表查询失败！"));
 	}
 
-	//调整列宽以适应内容
+	// 自适应列宽
 	m_List_TotalTable.SetColumnWidth(0, LVSCW_AUTOSIZE_USEHEADER);
 	m_List_TotalTable.SetColumnWidth(1, LVSCW_AUTOSIZE_USEHEADER);
+	m_List_TotalTable.SetColumnWidth(2, LVSCW_AUTOSIZE_USEHEADER);
 }
 
-void CAccountBookDlg::OnBnClickedButtonSave()
+static BOOL IsInputValueValid(CString sValue)
 {
-	// TODO: 在此添加控件通知处理程序代码
-	CString sName, sValue, sComment;
-	m_Edit_UserName.GetWindowText(sName);
-	m_Edit_ChangeValue.GetWindowText(sValue);
-	m_Edit_ChangeComment.GetWindowText(sComment);
-
-	sName.Trim();
-	sValue.Trim();
-	sComment.Trim();
-
-	if (sName.IsEmpty())
-	{
-		AfxMessageBox(_T("请输入用户姓名"));
-		m_Edit_UserName.SetFocus();
-		return;
-	}
-	if (sValue.IsEmpty())
-	{
-		AfxMessageBox(_T("请输入变更值"));
-		m_Edit_ChangeValue.SetFocus();
-		return;
-	}
-
 	BOOL bHasDot = FALSE;
 	BOOL bValid = TRUE;
 	for (int i = 0; i < sValue.GetLength(); i++)
 	{
 		TCHAR ch = sValue[i];
-		if (ch == _T('-'))
+		if (ch == _T('-'))	//不允许用户输入负号，输入整数后由代码来做减法，最终值为Repay-Borrow的结果
 		{
-			if (i != 0) // 负号不在首位
-			{
-				bValid = FALSE;
-				break;
-			}
+			bValid = FALSE;
+			break;
 		}
 		else if (ch == _T('.'))
 		{
@@ -327,19 +303,65 @@ void CAccountBookDlg::OnBnClickedButtonSave()
 			break;
 		}
 	}
+	return bValid;
+}
 
-	if (bValid == FALSE)
+void CAccountBookDlg::OnBnClickedButtonSave()
+{
+	// TODO: 在此添加控件通知处理程序代码
+	CString sName, sBorrow, sRepay, sComment;
+	CString sDate = CTime::GetCurrentTime().Format(_T("%Y-%m-%d %H:%M:%S"));
+	m_Edit_UserName.GetWindowText(sName);
+	m_Edit_Borrow.GetWindowText(sBorrow);
+	m_Edit_Repay.GetWindowText(sRepay);
+	m_Edit_ChangeComment.GetWindowText(sComment);
+
+	sName.Trim();
+	sBorrow.Trim();
+	sRepay.Trim();
+	sComment.Trim();
+
+	if (sName.IsEmpty())
 	{
-		AfxMessageBox(_T("变动金额格式不正确，请输入数字，允许有一个小数点和一个负号，负号仅允许在第一位。"));
-		m_Edit_ChangeValue.SetFocus();
+		AfxMessageBox(_T("请输入用户姓名"));
+		m_Edit_UserName.SetFocus();
+		return;
+	}
+	if (sBorrow.IsEmpty() && sRepay.IsEmpty())
+	{
+		AfxMessageBox(_T("请输入欠或还金额"));
+		m_Edit_Borrow.SetFocus();
 		return;
 	}
 
-	double dValue = _tstof(sValue);
-	CString sDate = CTime::GetCurrentTime().Format(_T("%Y-%m-%d %H:%M:%S"));
+	if (sBorrow.IsEmpty())
+	{
+		sBorrow = _T("0");
+	}
+
+	if (sRepay.IsEmpty())
+	{
+		sRepay = _T("0");
+	}
+	if (IsInputValueValid(sBorrow) == FALSE)
+	{
+		AfxMessageBox(_T("欠款金额格式不正确，请输入数字，只允许有一个小数点。"));
+		m_Edit_Borrow.SetFocus();
+		return;
+	}
+	if (IsInputValueValid(sRepay) == FALSE)
+	{
+		AfxMessageBox(_T("还款金额格式不正确，请输入数字，只允许有一个小数点。"));
+		m_Edit_Repay.SetFocus();
+		return;
+	}
+
+	double dBorrow = _tstof(sBorrow);   // 借款金额（已保证为数值）
+	double dRepay = _tstof(sRepay);    // 还款金额（已保证为数值）
+	double dValue = dBorrow - dRepay;
 
 	CStringA sUtf8Name = ToUtf8(sName);
-	CString sUtf8Comment = ToUtf8(sComment);
+	CStringA sUtf8Comment = ToUtf8(sComment);
 
 	sUtf8Name.Replace("'", "''"); // 转义单引号
 	sUtf8Comment.Replace("'", "''");
@@ -349,7 +371,9 @@ void CAccountBookDlg::OnBnClickedButtonSave()
 	BOOL bUserExists = FALSE;
 
 	CStringA sSqlQuery;
-	sSqlQuery.Format("SELECT id, user_total FROM User WHERE user_name = '%s';", sUtf8Name.GetString());
+	sSqlQuery.Format("SELECT id, user_total FROM User WHERE user_name = '%s';", 
+		sUtf8Name.GetString()
+	);
 
 	struct QueryResult
 	{
@@ -386,12 +410,18 @@ void CAccountBookDlg::OnBnClickedButtonSave()
 	CStringA sSqlUpdate;
 	if (bUserExists)
 	{
-		sSqlUpdate.Format("UPDATE User SET user_total = %.2f WHERE id = %d;", dNewTotal, nUserId);
+		sSqlUpdate.Format("UPDATE User SET user_total = %.2f WHERE id = %d;", 
+			dNewTotal, 
+			nUserId
+		);
 
 	}
 	else
 	{
-		sSqlUpdate.Format("INSERT INTO User (user_name, user_total) VALUES ('%s', %.2f);", sUtf8Name.GetString(), dNewTotal);
+		sSqlUpdate.Format("INSERT INTO User (user_name, user_total) VALUES ('%s', %.2f);", 
+			sUtf8Name.GetString(), 
+			dNewTotal
+		);
 	}
 	if (!m_dbHelper.ExecuteSQL(CString(sSqlUpdate)))
 	{
@@ -412,8 +442,14 @@ void CAccountBookDlg::OnBnClickedButtonSave()
 
 	//插入变动日志
 	CStringA sSqlInsertLog;
-	sSqlInsertLog.Format("INSERT INTO Change_Log (user_id, change_val, change_date, change_comment) VALUES (%d, %.2f, '%s', '%s');",
-		nUserId, dValue, CStringA(sDate).GetString(), sUtf8Comment.GetString());
+	sSqlInsertLog.Format("INSERT INTO Change_Log (user_id, change_borrow, change_repay, change_val, change_date, change_comment) VALUES (%d, %.2f, %.2f, %.2f, '%s', '%s');",
+		nUserId, 
+		dBorrow, 
+		dRepay, 
+		dValue, 
+		CStringA(sDate).GetString(), 
+		sUtf8Comment.GetString()
+	);
 
 	if (!m_dbHelper.ExecuteSQL(CString(sSqlInsertLog)))
 	{
@@ -425,7 +461,166 @@ void CAccountBookDlg::OnBnClickedButtonSave()
 	RefreshTotalTable();
 
 	//清空各输入框，姓名框保留，用来一个人输入多次
-	m_Edit_ChangeValue.SetWindowText(_T(""));
+	m_Edit_Borrow.SetWindowText(_T(""));
+	m_Edit_Repay.SetWindowText(_T(""));
 	m_Edit_ChangeComment.SetWindowText(_T(""));
-	m_Edit_ChangeValue.SetFocus();
+	m_Edit_Borrow.SetFocus();
+}
+
+void CAccountBookDlg::OnBnClickedButtonAllSettle()
+{
+	//获取姓名
+	CString sName;
+	m_Edit_UserName.GetWindowText(sName);
+	sName.Trim();
+
+	if (sName.IsEmpty())
+	{
+		AfxMessageBox(_T("请先输入用户姓名！"));
+		m_Edit_UserName.SetFocus();
+		return;
+	}
+
+	//转换为 UTF-8 并转义单引号
+	CStringA sUtf8Name = ToUtf8(sName);
+	sUtf8Name.Replace("'", "''");
+
+	//查询用户 id 和当前总额
+	CStringA sSqlQuery;
+	sSqlQuery.Format("SELECT id, user_total FROM User WHERE user_name='%s';", 
+		sUtf8Name.GetString()
+	);
+
+	struct QueryResult {
+		int userId;
+		double userTotal;
+		BOOL found;
+	} result = { 0, 0.0, FALSE };
+
+	auto callback = [](void* pParam, int argc, char** argv, char** /*azColName*/) -> int {
+		QueryResult* pRes = (QueryResult*)pParam;
+		if (argc > 0 && argv[0] != NULL)
+		{
+			pRes->userId = atoi(argv[0]);
+			pRes->userTotal = (argv[1] != NULL) ? atof(argv[1]) : 0.0;
+			pRes->found = TRUE;
+		}
+		return 0;
+		};
+
+	if (!m_dbHelper.ExecuteQuery(CString(sSqlQuery), callback, &result))
+	{
+		AfxMessageBox(_T("查询用户信息失败！"));
+		return;
+	}
+
+	if (!result.found)
+	{
+		AfxMessageBox(_T("用户“") + sName + _T("”不存在！"));
+		m_Edit_UserName.SetFocus();
+		return;
+	}
+
+	CString sMsg;
+	sMsg.Format(_T("确认要结清【%s】的所有【%.2f】元款项吗？"), sName, result.userTotal);
+	if (AfxMessageBox(sMsg, MB_YESNO | MB_ICONQUESTION) != IDYES)
+	{
+		return;  // 用户取消
+	}
+
+	//开始事务
+	if (!m_dbHelper.ExecuteSQL(_T("BEGIN;")))
+	{
+		AfxMessageBox(_T("数据库操作失败！"));
+		return;
+	}
+
+	//将用户总额清零
+	CStringA sSqlUpdate;
+	sSqlUpdate.Format("UPDATE User SET user_total = 0 WHERE id = %d;", 
+		result.userId
+	);
+	if (!m_dbHelper.ExecuteSQL(CString(sSqlUpdate)))
+	{
+		m_dbHelper.ExecuteSQL(_T("ROLLBACK;"));
+		AfxMessageBox(_T("清零用户总额失败！"));
+		return;
+	}
+
+	//插入一条结清记录
+	CString sDate = CTime::GetCurrentTime().Format(_T("%Y-%m-%d %H:%M:%S"));
+	CStringA sUtf8Comment = ToUtf8(_T("结清一次"));  // 固定备注
+	sUtf8Comment.Replace("'", "''");
+
+	CStringA sSqlInsertLog;
+	sSqlInsertLog.Format(
+		"INSERT INTO Change_Log (user_id, change_borrow, change_repay, change_val, change_date, change_comment) "
+		"VALUES (%d, 0, 0, 0, '%s', '%s');",
+		result.userId,
+		CStringA(sDate).GetString(),
+		sUtf8Comment.GetString()
+	);
+
+	if (!m_dbHelper.ExecuteSQL(CString(sSqlInsertLog)))
+	{
+		m_dbHelper.ExecuteSQL(_T("ROLLBACK;"));
+		AfxMessageBox(_T("插入结清记录失败！"));
+		return;
+	}
+
+	//提交事务
+	if (!m_dbHelper.ExecuteSQL(_T("COMMIT;")))
+	{
+		m_dbHelper.ExecuteSQL(_T("ROLLBACK;"));
+		AfxMessageBox(_T("提交事务失败！"));
+		return;
+	}
+
+	//刷新总表显示
+	RefreshTotalTable();
+
+	//清空姓名输入框（也可保留，按习惯调整）
+	m_Edit_UserName.SetWindowText(_T(""));
+	m_Edit_UserName.SetFocus();
+}
+
+void CAccountBookDlg::OnOK()
+{
+	// TODO: 在此添加专用代码和/或调用基类
+	OnBnClickedButtonSave();
+	//CDialogEx::OnOK();
+}
+
+BOOL CAccountBookDlg::PreTranslateMessage(MSG* pMsg)
+{
+	// TODO: 在此添加专用代码和/或调用基类
+	if (pMsg->message == WM_KEYDOWN)
+	{
+		if (pMsg->wParam == VK_ESCAPE)
+		{
+			// 可类似判断，这里暂全部拦截
+			return TRUE;
+		}
+	}
+	return CDialogEx::PreTranslateMessage(pMsg);
+}
+
+void CAccountBookDlg::OnClickListTotalTable(NMHDR* pNMHDR, LRESULT* pResult)
+{
+	LPNMITEMACTIVATE pNMItemActivate = reinterpret_cast<LPNMITEMACTIVATE>(pNMHDR);
+	// TODO: 在此添加控件通知处理程序代码
+	int nItem = pNMItemActivate->iItem;          // 被点击的行索引
+	if (nItem != -1)                             // 确保点击有效行
+	{
+		CString strName = m_List_TotalTable.GetItemText(nItem, 1); // 姓名在第1列
+		m_Edit_UserName.SetWindowText(strName);
+	}
+	*pResult = 0;
+}
+
+void CAccountBookDlg::OnDblclkListTotalTable(NMHDR* pNMHDR, LRESULT* pResult)
+{
+	LPNMITEMACTIVATE pNMItemActivate = reinterpret_cast<LPNMITEMACTIVATE>(pNMHDR);
+	// TODO: 在此添加控件通知处理程序代码
+	*pResult = 0;
 }
