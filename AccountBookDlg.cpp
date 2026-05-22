@@ -67,6 +67,7 @@ void CAccountBookDlg::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_EDIT_DATA_BORROW, m_Edit_Borrow);
 	DDX_Control(pDX, IDC_EDIT_DATA_REPAY, m_Edit_Repay);
 	DDX_Control(pDX, IDC_BUTTON_ALL_SETTLE, m_Button_AllSettle);
+	DDX_Control(pDX, IDC_BUTTON_ADD, m_Button_Add);
 }
 
 BEGIN_MESSAGE_MAP(CAccountBookDlg, CDialogEx)
@@ -78,6 +79,7 @@ BEGIN_MESSAGE_MAP(CAccountBookDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_BUTTON_ALL_SETTLE, &CAccountBookDlg::OnBnClickedButtonAllSettle)
 	ON_NOTIFY(NM_CLICK, IDC_LIST_TOTAL_TABLE, &CAccountBookDlg::OnClickListTotalTable)
 	ON_NOTIFY(NM_DBLCLK, IDC_LIST_TOTAL_TABLE, &CAccountBookDlg::OnDblclkListTotalTable)
+	ON_BN_CLICKED(IDC_BUTTON_ADD, &CAccountBookDlg::OnBnClickedButtonAdd)
 END_MESSAGE_MAP()
 
 
@@ -622,5 +624,87 @@ void CAccountBookDlg::OnDblclkListTotalTable(NMHDR* pNMHDR, LRESULT* pResult)
 {
 	LPNMITEMACTIVATE pNMItemActivate = reinterpret_cast<LPNMITEMACTIVATE>(pNMHDR);
 	// TODO: 在此添加控件通知处理程序代码
+	int nItem = pNMItemActivate->iItem;
+	if (nItem != -1)   // 确保双击的是有效行
+	{
+		// 暂时只获取用户ID和姓名，以备后续传递给详情对话框
+		CString sUserID = m_List_TotalTable.GetItemText(nItem, 0);   // 第一列：ID
+		CString sUserName = m_List_TotalTable.GetItemText(nItem, 1); // 第二列：姓名
+		CString sTotal = m_List_TotalTable.GetItemText(nItem, 2);    // 第三列：欠账总额（可选）
+
+		// 创建并弹出模态对话框（目前为空，不加载数据）
+		CUserDetailDlg dlg;
+		dlg.m_sUserID = sUserID;
+		dlg.m_sUserName = sUserName;
+		dlg.m_sUserTotal = sTotal;
+		dlg.m_pDBHelper = &m_dbHelper;  // 传递数据库助手对象
+		dlg.DoModal();
+	}
 	*pResult = 0;
+}
+
+void CAccountBookDlg::OnBnClickedButtonAdd()
+{
+	// TODO: 在此添加控件通知处理程序代码
+	CString sName;
+	m_Edit_UserName.GetWindowText(sName);
+	sName.Trim();
+
+	if (sName.IsEmpty())
+	{
+		AfxMessageBox(_T("请输入用户姓名！"));
+		m_Edit_UserName.SetFocus();
+		return;
+	}
+
+	CStringA sUtf8Name = ToUtf8(sName);
+	sUtf8Name.Replace("'", "''");
+
+	CStringA sSqlQuery;
+	sSqlQuery.Format("SELECT id FROM User WHERE user_name='%s';",
+		sUtf8Name.GetString()
+	);
+
+	struct QueryResult {
+		int userId;
+		BOOL found;
+	} result = { 0, FALSE };
+
+	auto callback = [](void* pParam, int argc, char** argv, char** /*azColName*/) -> int {
+		QueryResult* pRes = (QueryResult*)pParam;
+		if (argc > 0 && argv[0] != NULL)
+		{
+			pRes->userId = atoi(argv[0]);
+			pRes->found = TRUE;
+		}
+		return 0;
+		};
+
+	if (!m_dbHelper.ExecuteQuery(CString(sSqlQuery), callback, &result))
+	{
+		AfxMessageBox(_T("查询用户信息失败！"));
+		return;
+	}
+
+	if (result.found)
+	{
+		AfxMessageBox(_T("用户【") + sName + _T("】已存在！"));
+		m_Edit_UserName.SetFocus();
+		return;
+	}
+
+	CStringA sSqlInsert;
+	sSqlInsert.Format("INSERT INTO User (user_name, user_total) VALUES ('%s', 0);",
+		sUtf8Name.GetString()
+	);
+	if (!m_dbHelper.ExecuteSQL(CString(sSqlInsert)))
+	{
+		AfxMessageBox(_T("插入用户信息失败！"));
+		return;
+	}
+
+	RefreshTotalTable();
+
+	m_Edit_UserName.SetWindowText(_T(""));
+	m_Edit_UserName.SetFocus();
 }

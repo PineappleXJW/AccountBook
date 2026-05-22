@@ -6,6 +6,7 @@
 
 #include "SQLiteHelper.h"
 #include "CommFunc.h"
+#include "UserDetailDlg.h"
 
 // CAccountBookDlg 对话框
 class CAccountBookDlg : public CDialogEx
@@ -62,4 +63,6 @@ public:
 	virtual BOOL PreTranslateMessage(MSG* pMsg);
 	afx_msg void OnClickListTotalTable(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg void OnDblclkListTotalTable(NMHDR* pNMHDR, LRESULT* pResult);
+	CButton m_Button_Add;
+	afx_msg void OnBnClickedButtonAdd();
 };
